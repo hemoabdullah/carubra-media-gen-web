@@ -45,6 +45,7 @@ export async function POST(req: NextRequest) {
 
     if (style) {
       const norm = style.replace('-', ':')
+      console.log(`[video-ai] Style input: "${style}", normalized: "${norm}"`)
       if (norm === '9:16' || norm === '3:4') {
         dbAspectRatio = '9:16'
         providerAspectRatio = '9:16'
@@ -56,6 +57,8 @@ export async function POST(req: NextRequest) {
         providerAspectRatio = '16:9'
       }
     }
+
+    console.log(`[video-ai] Aspect ratio mapping - input style: "${style}", dbAspectRatio: "${dbAspectRatio}", providerAspectRatio: "${providerAspectRatio}"`)
 
     const newVideo = {
       id: uuidv4(),

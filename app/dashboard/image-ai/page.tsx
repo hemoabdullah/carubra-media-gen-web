@@ -463,7 +463,8 @@ export default function ImageAIPage() {
         completionTokens: usage?.completion_tokens ?? null,
         metadata: { imageUrl, imageId },
       })
-    } catch {
+    } catch (err) {
+      console.error('[image-ai] Frontend - caption generation failed:', err)
       setResultCaption("Gagal membuat caption.")
     } finally {
       setIsCaptioning(false)
@@ -608,7 +609,9 @@ export default function ImageAIPage() {
         completionTokens: usage?.completion_tokens ?? null,
         metadata: { imageId: item.id, imageUrl: item.imageUrl },
       })
-    } catch {} finally {
+    } catch (err) {
+      console.error('[image-ai] Frontend - caption regen failed:', err)
+    } finally {
       setIsModalCaptioning(false)
     }
   }
@@ -653,7 +656,9 @@ export default function ImageAIPage() {
   }
 
   const openDetail = (item: HistoryItem) => {
-    setDetailItem(item)
+    // Create a deep copy to prevent reference corruption
+    const itemCopy = { ...item }
+    setDetailItem(itemCopy)
     setDetailOpen(true)
     // Fallback: if completed image has no caption, auto-generate one
     if (item.status === "success" && item.imageUrl && !item.caption) {

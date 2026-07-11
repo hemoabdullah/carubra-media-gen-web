@@ -82,6 +82,13 @@ function DetailModal({
 
   useEffect(() => {
     if (item) {
+      console.log('[video-ai] DetailModal - received item prop:', {
+        id: item.id,
+        videoUrl: item.videoUrl,
+        videoUrl_type: typeof item.videoUrl,
+        videoUrl_length: item.videoUrl?.length,
+        status: item.status,
+      })
       setEditTitle(item.title)
       setEditScript(item.script)
       setEditCaption(item.caption)
@@ -131,8 +138,26 @@ function DetailModal({
         <div className="grid md:grid-cols-2 gap-0 max-h-[75vh] overflow-y-auto">
           {/* Left: Video Preview */}
           <div className="bg-black/10 dark:bg-black/40 flex items-center justify-center p-4 min-h-[280px]">
+            {(() => {
+              console.log('[video-ai] DetailModal - rendering video preview:', {
+                hasVideoUrl: !!item.videoUrl,
+                videoUrl: item.videoUrl,
+                videoUrl_type: typeof item.videoUrl,
+                videoUrl_length: item.videoUrl?.length,
+                status: item.status,
+              })
+              return null
+            })()}
             {item.videoUrl ? (
-              <video src={item.videoUrl} controls className="rounded-xl w-full max-h-[420px] shadow-lg" />
+              <video src={item.videoUrl} controls className="rounded-xl w-full max-h-[420px] shadow-lg object-contain"
+                onLoadStart={(e) => console.log('[VIDEO-DEBUG] loadstart', { src: e.currentTarget.currentSrc, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                onLoadedMetadata={(e) => console.log('[VIDEO-DEBUG] loadedmetadata', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, dur: e.currentTarget.duration, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                onLoadedData={(e) => console.log('[VIDEO-DEBUG] loadeddata', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                onCanPlay={(e) => console.log('[VIDEO-DEBUG] canplay', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                onCanPlayThrough={(e) => console.log('[VIDEO-DEBUG] canplaythrough', { src: e.currentTarget.currentSrc })}
+                onPlaying={(e) => console.log('[VIDEO-DEBUG] playing', { src: e.currentTarget.currentSrc, time: e.currentTarget.currentTime })}
+                onError={(e) => console.log('[VIDEO-DEBUG] error', { src: e.currentTarget.currentSrc, code: e.currentTarget.error?.code, message: (e.currentTarget.error as any)?.message, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+              />
             ) : item.status === "generating" ? (
               <div className="flex flex-col items-center gap-3 text-muted-foreground">
                 <Loader2 className="h-10 w-10 animate-spin text-primary" />
@@ -427,22 +452,40 @@ export default function VideoAIPage() {
     fetch("/api/video-ai", { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => {
-        const items: VideoItem[] = (data.videos || []).map((v: any) => ({
-          id: v.id,
-          jobId: v.job_id || v.jobId,
-          title: v.prompt?.slice(0, 40) || "Video",
-          script: v.prompt || "",
-          resolution: (v.resolution || "480p") as Resolution,
-          ratio: v.aspect_ratio || v.style || "16-9",
-          model: (v.model || "text-to-video") as VideoModel,
-          duration: v.duration || 30,
-          coinCost: v.coins_used || 2,
-          status: v.status === "completed" ? "completed" : v.status === "failed" ? "failed" : "generating",
-          completedTime: null,
-          caption: v.caption || "",
-          createdAt: new Date(v.created_at || v.createdAt),
-          videoUrl: v.video_url || v.videoUrl,
-        }))
+        console.log('[video-ai] Frontend - received from history API:', data)
+        const items: VideoItem[] = (data.videos || []).map((v: any) => {
+          const videoUrl = v.video_url || v.videoUrl || null
+          const mapped = {
+            id: v.id,
+            jobId: v.job_id || v.jobId,
+            title: v.prompt?.slice(0, 40) || "Video",
+            script: v.prompt || "",
+            resolution: (v.resolution || "480p") as Resolution,
+            ratio: v.aspect_ratio || v.style || "16-9",
+            model: (v.model || "text-to-video") as VideoModel,
+            duration: v.duration || 30,
+            coinCost: v.coins_used || 2,
+            status: v.status === "completed" ? "completed" : v.status === "failed" ? "failed" : "generating",
+            completedTime: null,
+            caption: v.caption || "",
+            createdAt: new Date(v.created_at || v.createdAt),
+            videoUrl: videoUrl,
+          }
+          console.log(`[video-ai] Frontend - mapped video item ${mapped.id}:`, {
+            videoUrl: mapped.videoUrl,
+            videoUrl_type: typeof mapped.videoUrl,
+            videoUrl_length: mapped.videoUrl?.length,
+            hasVideoUrl: !!mapped.videoUrl,
+            status: mapped.status,
+            db_aspect_ratio: v.aspect_ratio,
+            db_style: v.style,
+            mapped_ratio: mapped.ratio,
+            db_resolution: v.resolution,
+            mapped_resolution: mapped.resolution,
+          })
+          return mapped
+        })
+        console.log('[video-ai] Frontend - setting history state with', items.length, 'items')
         setHistory(items)
 
         // Resume polling untuk video yang masih processing
@@ -808,7 +851,19 @@ export default function VideoAIPage() {
   }
 
   const openDetail = (item: VideoItem) => {
-    setDetailItem(item)
+    console.log('[video-ai] Frontend - openDetail called with item:', {
+      id: item.id,
+      videoUrl: item.videoUrl,
+      videoUrl_type: typeof item.videoUrl,
+      videoUrl_length: item.videoUrl?.length,
+      hasVideoUrl: !!item.videoUrl,
+      status: item.status,
+    })
+    console.log('[video-ai] Frontend - setting detailItem state with full item:', item)
+    // Create a deep copy to prevent reference corruption
+    const itemCopy = { ...item }
+    console.log('[video-ai] Frontend - itemCopy videoUrl:', itemCopy.videoUrl)
+    setDetailItem(itemCopy)
     setDetailOpen(true)
     // Fallback: if completed video has no caption, auto-generate one
     if (item.status === "completed" && !item.caption) {
@@ -986,7 +1041,15 @@ export default function VideoAIPage() {
                     <p className="text-xs opacity-60">Ini mungkin memerlukan beberapa menit</p>
                   </div>
                 ) : activeItem?.status === "completed" && activeItem?.videoUrl ? (
-                  <video src={activeItem.videoUrl} controls className="w-full h-full rounded-xl" />
+                  <video src={activeItem.videoUrl} controls className="w-full h-full rounded-xl object-contain"
+                    onLoadStart={(e) => console.log('[VIDEO-DEBUG] active-loadstart', { src: e.currentTarget.currentSrc, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                    onLoadedMetadata={(e) => console.log('[VIDEO-DEBUG] active-loadedmetadata', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, dur: e.currentTarget.duration, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                    onLoadedData={(e) => console.log('[VIDEO-DEBUG] active-loadeddata', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                    onCanPlay={(e) => console.log('[VIDEO-DEBUG] active-canplay', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                    onCanPlayThrough={(e) => console.log('[VIDEO-DEBUG] active-canplaythrough', { src: e.currentTarget.currentSrc })}
+                    onPlaying={(e) => console.log('[VIDEO-DEBUG] active-playing', { src: e.currentTarget.currentSrc, time: e.currentTarget.currentTime })}
+                    onError={(e) => console.log('[VIDEO-DEBUG] active-error', { src: e.currentTarget.currentSrc, code: e.currentTarget.error?.code, message: (e.currentTarget.error as any)?.message, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                  />
                 ) : activeItem?.status === "failed" ? (
                   <div className="flex flex-col items-center gap-3 text-muted-foreground p-8 text-center">
                     <XCircle className="h-12 w-12 opacity-40 text-destructive" />
@@ -1136,7 +1199,15 @@ export default function VideoAIPage() {
                     >
                       <div className="aspect-video bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center relative">
                         {item.videoUrl
-                          ? <video src={item.videoUrl} className="w-full h-full object-cover" />
+                          ? <video src={item.videoUrl} className="w-full h-full object-cover"
+                              onLoadStart={(e) => console.log('[VIDEO-DEBUG] gallery-loadstart', { src: e.currentTarget.currentSrc, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                              onLoadedMetadata={(e) => console.log('[VIDEO-DEBUG] gallery-loadedmetadata', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, dur: e.currentTarget.duration, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                              onLoadedData={(e) => console.log('[VIDEO-DEBUG] gallery-loadeddata', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                              onCanPlay={(e) => console.log('[VIDEO-DEBUG] gallery-canplay', { src: e.currentTarget.currentSrc, vw: e.currentTarget.videoWidth, vh: e.currentTarget.videoHeight, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                              onCanPlayThrough={(e) => console.log('[VIDEO-DEBUG] gallery-canplaythrough', { src: e.currentTarget.currentSrc })}
+                              onPlaying={(e) => console.log('[VIDEO-DEBUG] gallery-playing', { src: e.currentTarget.currentSrc, time: e.currentTarget.currentTime })}
+                              onError={(e) => console.log('[VIDEO-DEBUG] gallery-error', { src: e.currentTarget.currentSrc, code: e.currentTarget.error?.code, message: (e.currentTarget.error as any)?.message, network: e.currentTarget.networkState, ready: e.currentTarget.readyState })}
+                            />
                           : <Video className="h-12 w-12 text-muted-foreground opacity-40" />
                         }
                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">

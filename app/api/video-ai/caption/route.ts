@@ -2,46 +2,120 @@ import { NextRequest, NextResponse } from 'next/server'
 import { findOne, updateOne } from '@/lib/supabase'
 import { getUserFromRequest } from '@/middleware/auth'
 
-// Fallback caption generator when API is not configured
-function generateFallbackCaption(script: string): string {
-  const isIndonesian = /[a-zA-Z]/.test(script) && 
-    (script.includes('yang') || script.includes('dan') || script.includes('di') || 
-     script.includes('untuk') || script.includes('dengan') || script.includes('adalah'))
-  
-  if (isIndonesian) {
-    const indonesianCaptions = [
-      `Video yang menginspirasi! ✨ ${script.slice(0, 30)}... #VideoKreatif #Inspirasi #Harian`,
-      `Berbagi cerita melalui video ini 🎬 ${script.slice(0, 30)}... #Konten #Eksplorasi #Baru`,
-      `Setiap video punya pesan tersendiri 🎥 ${script.slice(0, 30)}... #Kreativitas #Imajinasi #Ekspresi`,
-      `Terinspirasi dari ide-ide brilian 💡 ${script.slice(0, 30)}... #Ide #Inovasi #VideoSeni`,
-      `Menikmati proses kreatif setiap hari 🚀 ${script.slice(0, 30)}... #Produktif #Semangat #Hidup`,
-    ]
-    return indonesianCaptions[Math.floor(Math.random() * indonesianCaptions.length)]
-  } else {
-    const englishCaptions = [
-      `Inspiring video content! ✨ ${script.slice(0, 30)}... #CreativeVideo #Inspiration #Daily`,
-      `Sharing stories through this video 🎬 ${script.slice(0, 30)}... #Content #Exploration #New`,
-      `Every video has its own message 🎥 ${script.slice(0, 30)}... #Creativity #Imagination #Expression`,
-      `Inspired by brilliant ideas 💡 ${script.slice(0, 30)}... #Ideas #Innovation #VideoArt`,
-      `Enjoying the creative process every day 🚀 ${script.slice(0, 30)}... #Productive #Motivation #Life`,
-    ]
-    return englishCaptions[Math.floor(Math.random() * englishCaptions.length)]
+function detectLanguage(prompt: string): 'indonesian' | 'english' {
+  const indonesianIndicators = ['yang', 'dan', 'di', 'untuk', 'dengan', 'adalah', 'ini', 'itu', 'ke', 'dari', 'pada']
+  const hasIndonesian = indonesianIndicators.some(word => prompt.toLowerCase().includes(word))
+  return hasIndonesian ? 'indonesian' : 'english'
+}
+
+function generateFallbackCaption(prompt: string): string {
+  const lang = detectLanguage(prompt)
+  const words = prompt.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+  const candidates = words.filter(w => !['yang', 'dengan', 'untuk', 'tidak', 'adalah', 'dalam', 'sebuah', 'seperti', 'ketika', 'setelah', 'before', 'after', 'with', 'from', 'that', 'this', 'into', 'about', 'would', 'could', 'should', 'their', 'there', 'which'].includes(w))
+  const tags = [...new Set(candidates.slice(0, 5))]
+  const hashtags = tags.map(t => `#${t.replace(/[^a-zA-Z0-9]/g, '')}`).join(' ')
+
+  if (lang === 'indonesian') {
+    return `Cek videonya! 🔥\n\n${hashtags}`
   }
+  return `Check this out! 🔥\n\n${hashtags}`
+}
+
+function buildSystemPrompt(platform: string): string {
+  return `You are a social media caption generator for ${platform}.
+
+Generate ONE caption based on the prompt below.
+Return ONLY the caption text.
+Include 3-5 relevant hashtags.`
+}
+
+function buildUserPrompt(originalPrompt: string, script: string, platform: string): string {
+  return `Original prompt: "${originalPrompt}"
+Video script: "${script}"
+
+Generate a ${platform} caption for this video.`
+}
+
+async function callCaptionAPI(
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+  systemContent: string,
+  userContent: string,
+  maxTokens: number,
+  reasoningEffort?: string
+): Promise<{ caption: string; usage: any; finishReason: string }> {
+  const messages: any[] = [
+    { role: 'system', content: systemContent },
+    { role: 'user', content: userContent },
+  ]
+
+  const requestBody: any = {
+    model,
+    messages,
+    max_tokens: maxTokens,
+  }
+  if (reasoningEffort) {
+    requestBody.reasoning_effort = reasoningEffort
+  }
+
+  console.log('[video-ai] Caption API call:', {
+    model,
+    maxTokens,
+    reasoningEffort,
+    systemPromptLength: systemContent.length,
+  })
+
+  const response = await fetch(`${apiUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(requestBody),
+  })
+
+  const responseText = await response.text()
+  console.log('[video-ai] Caption API response status:', response.status)
+
+  let data
+  try {
+    data = JSON.parse(responseText)
+  } catch (parseError) {
+    console.error('[video-ai] Failed to parse API response as JSON:', parseError)
+    console.error('[video-ai] Raw response text:', responseText)
+    throw new Error(`Invalid JSON (HTTP ${response.status})`)
+  }
+
+  if (data?.error) {
+    const errMsg = data.error?.message || JSON.stringify(data.error)
+    throw new Error(`API error: ${errMsg}`)
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${responseText.slice(0, 300)}`)
+  }
+
+  const finishReason = data?.choices?.[0]?.finish_reason ?? 'unknown'
+  const content: string | null = data?.choices?.[0]?.message?.content ?? null
+  const usage = data?.usage ?? null
+
+  return { caption: content ?? '', usage, finishReason }
 }
 
 export async function POST(req: NextRequest) {
+  console.log('[video-ai] Caption API - POST request received')
   const user = getUserFromRequest(req)
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const { script, videoId } = await req.json()
+    const { script, videoId, platform = 'tiktok' } = await req.json()
+    console.log('[video-ai] Caption API - request body:', { script, videoId, platform })
 
     const CAPTION_API_KEY = process.env.CAPTION_API_KEY
     const CAPTION_API_URL = process.env.CAPTION_API_URL
     const CAPTION_MODEL   = process.env.CAPTION_MODEL || 'utero/carubra-6.2.1'
 
-    let caption: string
-    let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null = null
     let videoRecord = null
     if (videoId) {
       try {
@@ -51,81 +125,83 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const sourceImageUrl = videoRecord?.source_image_url || videoRecord?.sourceImageUrl || null
+    const originalPrompt = videoRecord?.prompt || script
+    const language = detectLanguage(originalPrompt)
+
+    let caption: string
+    let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null = null
 
     if (CAPTION_API_KEY && CAPTION_API_URL) {
       try {
-        const messages: any[] = [
-          {
-            role: 'system',
-            content: `You are a professional Gen-Z social media manager and short-form video creator specializing in viral TikToks and Instagram Reels.
-Your task is to write a highly engaging, catchy, and authentic caption for a short video.
+        // Attempt 1: standard shortened prompt + large token budget
+        const systemPrompt = buildSystemPrompt(platform)
+        const userPrompt = buildUserPrompt(originalPrompt, script, platform)
 
-Follow these strict rules:
-1. Tone: Sound human, trendy, conversational, and energetic. Avoid generic AI phrases. Write as if you are the creator posting this video.
-2. Hook: Start with a strong hook or a relatable question to boost viewer engagement.
-3. Structure: Keep it concise (1-3 sentences max). Use line breaks for readability.
-4. Language: Match the language of the script/description automatically. If in Indonesian, use natural casual Indonesian (bahasa gaul/santai). If in English, use modern slang/informal English.
-5. Emojis & Hashtags: Include 1-3 relevant emojis and 3-5 specific hashtags at the end (e.g. #fyp #reels, and topic-specific hashtags).
-6. No templates: Do not use repetitive fallback templates. Each caption must be fully customized and unique.
-7. Output: Output ONLY the caption. No conversational filler.`,
-          }
-        ]
+        const result = await callCaptionAPI(
+          CAPTION_API_URL,
+          CAPTION_API_KEY,
+          CAPTION_MODEL,
+          systemPrompt,
+          userPrompt,
+          800,
+          'low'
+        )
 
-        if (sourceImageUrl) {
-          messages.push({
-            role: 'user',
-            content: [
-              { type: 'image_url', image_url: { url: sourceImageUrl } },
-              {
-                type: 'text',
-                text: `Write an engaging Reels/TikTok caption for this video. The video is generated from this source image and script: "${script}". Make the caption feel authentic and matching what you see.`,
-              }
-            ]
-          })
-        } else {
-          messages.push({
-            role: 'user',
-            content: `Write an engaging Reels/TikTok caption for this video based on this script/description: "${script}". Make the caption feel authentic and trendy.`,
-          })
-        }
+        caption = result.caption
+        usage = result.usage
 
-        const response = await fetch(`${CAPTION_API_URL}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${CAPTION_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: CAPTION_MODEL,
-            messages,
-            max_tokens: 300,
-          }),
+        console.log('[video-ai] Caption attempt 1:', {
+          finishReason: result.finishReason,
+          captionLength: caption.length,
         })
 
-        const data = await response.json()
-        caption = data?.choices?.[0]?.message?.content ?? ''
-        usage = data?.usage ?? null
-        
-        if (!caption) {
-          caption = generateFallbackCaption(script)
+        // Retry on length truncation with a minimal prompt
+        if (result.finishReason === 'length' || !caption) {
+          console.log('[video-ai] Caption truncated/length exceeded, retrying with minimal prompt...')
+
+          const retrySystem = `Generate a ${platform} caption. Return only the caption. Include hashtags.`
+          const retryUser = `Prompt: ${originalPrompt.slice(0, 200)}`
+
+          const retryResult = await callCaptionAPI(
+            CAPTION_API_URL,
+            CAPTION_API_KEY,
+            CAPTION_MODEL,
+            retrySystem,
+            retryUser,
+            800,
+            'low'
+          )
+
+          console.log('[video-ai] Caption retry result:', {
+            finishReason: retryResult.finishReason,
+            captionLength: retryResult.caption.length,
+            hasCaption: !!retryResult.caption,
+          })
+
+          if (retryResult.caption && retryResult.finishReason !== 'length') {
+            caption = retryResult.caption
+            usage = retryResult.usage || usage
+          } else {
+            // Both attempts failed — use local fallback
+            console.log('[video-ai] Both caption attempts failed, using fallback template')
+            caption = generateFallbackCaption(originalPrompt)
+            usage = null
+          }
         }
       } catch (apiError) {
-        console.error('[video-ai] Caption API failed, using fallback:', apiError)
-        caption = generateFallbackCaption(script)
+        console.error('[video-ai] Caption API failed entirely:', apiError)
+        // Fall back to local template — never return 502 for captions
+        caption = generateFallbackCaption(originalPrompt)
+        usage = null
       }
     } else {
-      console.log('[video-ai] Caption API not configured, using fallback generator')
-      caption = generateFallbackCaption(script)
+      caption = generateFallbackCaption(originalPrompt)
+      usage = null
     }
 
     if (videoId) {
       try {
-        await updateOne(
-          'videos',
-          { id: videoId },
-          { caption }
-        )
+        await updateOne('videos', { id: videoId }, { caption })
       } catch (dbError) {
         console.error('[video-ai] Failed to update caption in DB:', dbError)
       }
@@ -133,6 +209,7 @@ Follow these strict rules:
 
     return NextResponse.json({ caption, usage })
   } catch (error: any) {
-    return NextResponse.json({ error: 'Failed to generate caption', detail: String(error) }, { status: 502 })
+    console.error('[video-ai] Caption endpoint error:', error)
+    return NextResponse.json({ caption: generateFallbackCaption(''), usage: null })
   }
 }

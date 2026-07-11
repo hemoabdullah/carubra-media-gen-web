@@ -13,8 +13,8 @@ async function run() {
     }
     console.log(`User found: id=${user.id}, current_coins=${user.coins}`)
 
-    console.log('Crediting 50 coins to user7@gmail.com...')
-    const nextCoins = await creditUserCoinsByEmail('user7@gmail.com', 50)
+    console.log('Crediting 100 coins to user7@gmail.com...')
+    const nextCoins = await creditUserCoinsByEmail('user7@gmail.com', 100)
     console.log(`Success! New coin balance for user7@gmail.com: ${nextCoins}`)
   } catch (error) {
     console.error('Error crediting coins:', error)

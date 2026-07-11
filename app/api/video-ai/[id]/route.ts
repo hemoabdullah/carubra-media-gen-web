@@ -15,6 +15,18 @@ export async function GET(
     const video = videos?.[0] ?? null
     if (!video) return NextResponse.json({ error: 'Video not found' }, { status: 404 })
 
+    // Log video record structure for debugging
+    console.log('[video-ai] Detail API - video record:', {
+      id: video.id,
+      video_url: video.video_url,
+      video_url_type: typeof video.video_url,
+      video_url_prefix: video.video_url?.substring(0, 50),
+      storage_bucket: video.storage_bucket,
+      storage_path: video.storage_path,
+      source_uri: video.source_uri,
+      status: video.status,
+    })
+
     return NextResponse.json({ video })
   } catch (error: any) {
     return NextResponse.json({ error: 'Failed to fetch video', detail: String(error) }, { status: 500 })

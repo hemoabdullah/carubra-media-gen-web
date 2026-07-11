@@ -2,39 +2,132 @@ import { NextRequest, NextResponse } from 'next/server'
 import { updateOne } from '@/lib/supabase'
 import { getUserFromRequest } from '@/middleware/auth'
 
-// Fallback caption generator when API is not configured
+function detectLanguage(prompt: string): 'indonesian' | 'english' {
+  const indonesianIndicators = ['yang', 'dan', 'di', 'untuk', 'dengan', 'adalah', 'ini', 'itu', 'ke', 'dari', 'pada']
+  const hasIndonesian = indonesianIndicators.some(word => prompt.toLowerCase().includes(word))
+  return hasIndonesian ? 'indonesian' : 'english'
+}
+
 function generateFallbackCaption(prompt: string): string {
-  const isIndonesian = /[a-zA-Z]/.test(prompt) && 
-    (prompt.includes('yang') || prompt.includes('dan') || prompt.includes('di') || 
-     prompt.includes('untuk') || prompt.includes('dengan') || prompt.includes('adalah'))
-  
-  if (isIndonesian) {
-    const indonesianCaptions = [
-      `Momen yang tak terlupakan! ✨ ${prompt.slice(0, 30)}... #Inspirasi #Harian #Kreativitas`,
-      `Berbagi kebahagiaan melalui karya ini 🌟 ${prompt.slice(0, 30)}... #Seni #Eksplorasi #Baru`,
-      `Setiap karya punya ceritanya sendiri 🎨 ${prompt.slice(0, 30)}... #Kreativitas #Imajinasi #Ekspresi`,
-      `Terinspirasi dari ide-ide brilian 💡 ${prompt.slice(0, 30)}... #Ide #Inovasi #KaryaSeni`,
-      `Menikmati proses kreatif setiap hari 🚀 ${prompt.slice(0, 30)}... #Produktif #Semangat #Hidup`,
-    ]
-    return indonesianCaptions[Math.floor(Math.random() * indonesianCaptions.length)]
-  } else {
-    const englishCaptions = [
-      `Unforgettable moments! ✨ ${prompt.slice(0, 30)}... #Inspiration #Daily #Creativity`,
-      `Sharing joy through this creation 🌟 ${prompt.slice(0, 30)}... #Art #Exploration #New`,
-      `Every artwork has its own story 🎨 ${prompt.slice(0, 30)}... #Creativity #Imagination #Expression`,
-      `Inspired by brilliant ideas 💡 ${prompt.slice(0, 30)}... #Ideas #Innovation #Artwork`,
-      `Enjoying the creative process every day 🚀 ${prompt.slice(0, 30)}... #Productive #Motivation #Life`,
-    ]
-    return englishCaptions[Math.floor(Math.random() * englishCaptions.length)]
+  const lang = detectLanguage(prompt)
+  const words = prompt.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+  const candidates = words.filter(w => !['yang', 'dengan', 'untuk', 'tidak', 'adalah', 'dalam', 'sebuah', 'seperti', 'ketika', 'setelah', 'before', 'after', 'with', 'from', 'that', 'this', 'into', 'about', 'would', 'could', 'should', 'their', 'there', 'which'].includes(w))
+  const tags = [...new Set(candidates.slice(0, 5))]
+  const hashtags = tags.map(t => `#${t.replace(/[^a-zA-Z0-9]/g, '')}`).join(' ')
+
+  if (lang === 'indonesian') {
+    return `Cek gambarnya! 🔥\n\n${hashtags}`
   }
+  return `Check this out! 🔥\n\n${hashtags}`
+}
+
+function buildSystemPrompt(platform: string): string {
+  return `You are a social media content creator writing captions for ${platform}. Your captions must feel authentic and human-written, not AI-generated.
+
+CRITICAL RULES:
+1. The IMAGE is your primary source of truth. Analyze what is actually visible in the image first.
+2. The text prompt only provides extra context if something cannot be inferred from the image.
+3. Describe specific details visible in the image: people, clothing, activities, location, objects, mood, lighting.
+4. Write naturally like a real social media creator, not an AI assistant.
+5. NEVER use generic phrases like: "Sun-kissed", "Beautiful moments", "Enjoying life", "Check this out", "Living my best life", "Every picture tells a story", "Soaking in the beauty", "Good vibes", "Making memories".
+
+OUTPUT FORMAT:
+- 1 engaging caption (2-4 sentences)
+- 5-8 relevant hashtags based on the actual image content
+- Emojis only where they feel natural and appropriate
+
+CONTENT-SPECIFIC GUIDELINES:
+- If the image contains PEOPLE: Mention what they are doing, their expressions, and the context.
+- If the image is a PRODUCT: Create a marketing caption that highlights features/benefits naturally.
+- If the image is FOOD: Create a foodie caption describing the dish, flavors, or dining experience.
+- If the image is a LANDSCAPE: Create a travel caption describing the location and atmosphere.
+- If the image is a MEME: Create a funny, relatable caption that matches the humor.
+
+Return ONLY the caption with hashtags. No explanations, no meta-commentary.`
+}
+
+function buildUserPrompt(prompt: string, platform: string): string {
+  return `Original prompt: "${prompt}"
+
+Generate a ${platform} caption for this image.`
+}
+
+async function callCaptionAPI(
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+  systemContent: string,
+  userMessages: any[],
+  maxTokens: number,
+  reasoningEffort?: string
+): Promise<{ caption: string; usage: any; finishReason: string }> {
+  const messages: any[] = [
+    { role: 'system', content: systemContent },
+    ...userMessages,
+  ]
+
+  const requestBody: any = {
+    model,
+    messages,
+    max_tokens: maxTokens,
+  }
+  if (reasoningEffort) {
+    requestBody.reasoning_effort = reasoningEffort
+  }
+
+  console.log('[image-ai] Caption API call:', {
+    model,
+    maxTokens,
+    reasoningEffort,
+    systemPromptLength: systemContent.length,
+    userMessageCount: userMessages.length,
+  })
+
+  const response = await fetch(`${apiUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(requestBody),
+  })
+
+  const responseText = await response.text()
+  console.log('[image-ai] Caption API response status:', response.status)
+
+  let data
+  try {
+    data = JSON.parse(responseText)
+  } catch (parseError) {
+    console.error('[image-ai] Failed to parse API response as JSON:', parseError)
+    console.error('[image-ai] Raw response text:', responseText)
+    throw new Error(`Invalid JSON (HTTP ${response.status})`)
+  }
+
+  if (data?.error) {
+    const errMsg = data.error?.message || JSON.stringify(data.error)
+    throw new Error(`API error: ${errMsg}`)
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${responseText.slice(0, 300)}`)
+  }
+
+  const finishReason = data?.choices?.[0]?.finish_reason ?? 'unknown'
+  const content: string | null = data?.choices?.[0]?.message?.content ?? null
+  const usage = data?.usage ?? null
+
+  return { caption: content ?? '', usage, finishReason }
 }
 
 export async function POST(req: NextRequest) {
+  console.log('[image-ai] Caption API - POST request received')
   const user = getUserFromRequest(req)
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const { imageUrl, prompt, imageId } = await req.json()
+    const { imageUrl, prompt, imageId, platform = 'instagram' } = await req.json()
+    console.log('[image-ai] Caption API - request body:', { imageUrl: imageUrl?.slice(0, 50) + '...', prompt, imageId, platform })
 
     const CAPTION_API_KEY = process.env.CAPTION_API_KEY
     const CAPTION_API_URL = process.env.CAPTION_API_URL
@@ -44,71 +137,96 @@ export async function POST(req: NextRequest) {
     let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null = null
 
     if (CAPTION_API_KEY && CAPTION_API_URL) {
-      // Try to use the API if configured
       try {
-        const response = await fetch(`${CAPTION_API_URL}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${CAPTION_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: CAPTION_MODEL,
-            messages: [
-              {
-                role: 'system',
-                content: `You are a professional Gen-Z social media manager and content creator specializing in TikTok, Instagram Reels, and viral marketing.
-Your goal is to write a highly engaging, authentic, and contextual caption for a post.
+        const systemPrompt = buildSystemPrompt(platform)
+        const userMessages: any[] = imageUrl
+          ? [{ role: 'user', content: [
+              { type: 'image_url', image_url: { url: imageUrl } },
+              { type: 'text', text: buildUserPrompt(prompt, platform) },
+            ]}]
+          : [{ role: 'user', content: buildUserPrompt(prompt, platform) }]
 
-Follow these strict rules:
-1. Tone: Must sound human, natural, trendy, and slightly witty or conversational. Avoid corporate, dry, or repetitive language. Do not sound like a standard AI. Write as if you are the creator sharing their genuine excitement or thought.
-2. Structure: Keep it relatively short and punchy (1-3 sentences max). Use line breaks for readability if needed.
-3. Language: Automatically detect and match the language of the prompt/description. If the prompt is in Indonesian, write the entire caption in natural, modern colloquial Indonesian (bahasa santai/gaul, not overly formal). If it is in English, use modern casual English.
-4. Emojis: Include 1-3 highly relevant emojis placed naturally (not spammed).
-5. Hashtags: Include 3-5 highly relevant, specific hashtags at the very end. Avoid generic tags like #daily #joy; instead, use tags directly related to the actual visual content (e.g. if it's a cat image, use #catsofinstagram #cutepets).
-6. Authenticity: Never say "Here is a caption..." or "Prompt:". Output ONLY the final caption itself.
-7. Uniqueness: Avoid repetitive phrases or template structures (e.g., do not start with "Momen tak terlupakan" or "Berbagi kebahagiaan").`,
-              },
-              {
-                role: 'user',
-                content: [
-                  { type: 'image_url', image_url: { url: imageUrl } },
-                  {
-                    type: 'text',
-                    text: `Write an engaging and natural social media caption for this image based on what you actually see. The user's original image generation prompt was: "${prompt}". Do not repeat the prompt. Make the caption feel authentic like a real post on Instagram or TikTok.`,
-                  },
-                ],
-              },
-            ],
-            max_tokens: 300,
-          }),
+        const result = await callCaptionAPI(
+          CAPTION_API_URL,
+          CAPTION_API_KEY,
+          CAPTION_MODEL,
+          systemPrompt,
+          userMessages,
+          800,
+          'low'
+        )
+
+        caption = result.caption
+        usage = result.usage
+
+        console.log('[image-ai] Caption attempt 1:', {
+          finishReason: result.finishReason,
+          captionLength: caption.length,
         })
 
-        const data = await response.json()
-        caption = data?.choices?.[0]?.message?.content ?? ''
-        usage = data?.usage ?? null
-        
-        if (!caption) {
-          // API returned empty caption, use fallback
-          caption = generateFallbackCaption(prompt)
+        if (result.finishReason === 'length' || !caption) {
+          console.log('[image-ai] Caption truncated/length exceeded, retrying with minimal prompt...')
+
+          const retrySystem = `You are a social media content creator writing captions for Instagram. Your captions must feel authentic and human-written, not AI-generated.
+
+CRITICAL RULES:
+1. The IMAGE is your primary source of truth. Analyze what is actually visible in the image first.
+2. The text prompt only provides extra context if something cannot be inferred from the image.
+3. Describe specific details visible in the image: people, clothing, activities, location, objects, mood, lighting.
+4. Write naturally like a real social media creator, not an AI assistant.
+5. NEVER use generic phrases like: "Sun-kissed", "Beautiful moments", "Enjoying life", "Check this out", "Living my best life", "Every picture tells a story", "Soaking in the beauty", "Good vibes", "Making memories".
+
+OUTPUT FORMAT:
+- 1 engaging caption (2-4 sentences)
+- 5-8 relevant hashtags based on the actual image content
+- Emojis only where they feel natural and appropriate
+
+Return ONLY the caption with hashtags. No explanations, no meta-commentary.`
+          const retryMessages: any[] = imageUrl
+            ? [{ role: 'user', content: [
+                { type: 'image_url', image_url: { url: imageUrl } },
+                { type: 'text', text: `Prompt: ${prompt.slice(0, 200)}` },
+              ]}]
+            : [{ role: 'user', content: `Prompt: ${prompt.slice(0, 200)}` }]
+
+          const retryResult = await callCaptionAPI(
+            CAPTION_API_URL,
+            CAPTION_API_KEY,
+            CAPTION_MODEL,
+            retrySystem,
+            retryMessages,
+            800,
+            'low'
+          )
+
+          console.log('[image-ai] Caption retry result:', {
+            finishReason: retryResult.finishReason,
+            captionLength: retryResult.caption.length,
+            hasCaption: !!retryResult.caption,
+          })
+
+          if (retryResult.caption && retryResult.finishReason !== 'length') {
+            caption = retryResult.caption
+            usage = retryResult.usage || usage
+          } else {
+            console.log('[image-ai] Both caption attempts failed, using fallback template')
+            caption = generateFallbackCaption(prompt)
+            usage = null
+          }
         }
       } catch (apiError) {
-        console.error('[image-ai] Caption API failed, using fallback:', apiError)
+        console.error('[image-ai] Caption API failed entirely:', apiError)
         caption = generateFallbackCaption(prompt)
+        usage = null
       }
     } else {
-      // API not configured, use fallback
-      console.log('[image-ai] Caption API not configured, using fallback generator')
       caption = generateFallbackCaption(prompt)
+      usage = null
     }
 
     if (imageId) {
       try {
-        await updateOne(
-          'images',
-          { id: imageId },
-          { caption }
-        )
+        await updateOne('images', { id: imageId }, { caption })
       } catch (dbError) {
         console.error('[image-ai] Failed to update caption in DB:', dbError)
       }
@@ -116,6 +234,7 @@ Follow these strict rules:
 
     return NextResponse.json({ caption, usage })
   } catch (error: any) {
-    return NextResponse.json({ error: 'Failed to generate caption', detail: String(error) }, { status: 502 })
+    console.error('[image-ai] Caption endpoint error:', error)
+    return NextResponse.json({ caption: generateFallbackCaption(''), usage: null })
   }
 }

@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS public.videos (
   video_url TEXT,
   caption TEXT,
   generation_time_seconds INTEGER,
+  video_width INTEGER,
+  video_height INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );

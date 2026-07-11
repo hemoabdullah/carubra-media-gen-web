@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
-import { insert } from '@/lib/supabase'
+import { insert, updateOne, uploadToStorage } from '@/lib/supabase'
 import { creditUserCoins, deductUserCoins, ensureUserHasCoins, getImageCoinCost } from '@/lib/coins'
 import { getUserFromRequest } from '@/middleware/auth'
 
@@ -18,6 +18,28 @@ const VALID_SIZES: { w: number; h: number }[] = [
   { w: 1152, h: 864  }, // fallback
   { w: 864,  h: 1152 }, // fallback
 ]
+
+/**
+ * Convert image URL or base64 to Buffer
+ */
+async function imageUrlToBuffer(imageUrl: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  if (imageUrl.startsWith('data:')) {
+    // Base64 data URL
+    const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/)
+    if (!match) throw new Error('Invalid data URL format')
+    const mimeType = match[1]
+    const base64Data = match[2]
+    const buffer = Buffer.from(base64Data, 'base64')
+    return { buffer, mimeType }
+  } else {
+    // HTTP URL
+    const response = await fetch(imageUrl)
+    if (!response.ok) throw new Error(`Failed to download image: ${response.status}`)
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const mimeType = response.headers.get('content-type') || 'image/png'
+    return { buffer, mimeType }
+  }
+}
 
 /**
  * Snap requested dimensions to the nearest valid API preset.
@@ -250,7 +272,46 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: 'Fallback response did not return a valid image', detail: fallbackData }, { status: 502 })
           }
 
-          const completedFallback = { ...newImage, status: 'completed', image_url: fallbackUrl }
+          // Upload to Supabase Storage (fallback path)
+          let finalFallbackUrl = fallbackUrl
+          let storageMetadataFallback: {
+            storage_provider: string
+            storage_bucket: string
+            storage_path: string
+            source_uri: string
+            mime_type: string
+            size: number
+          } | null = null
+
+          try {
+            console.log('[image-ai] Uploading fallback image to Supabase Storage...')
+            const { buffer, mimeType } = await imageUrlToBuffer(fallbackUrl)
+            const storagePath = `${user.id}/${newImage.id}.png`
+            const publicUrl = await uploadToStorage('generated-images', storagePath, buffer, {
+              contentType: mimeType,
+              cacheControl: 'public, max-age=31536000',
+            })
+            console.log(`[image-ai] Fallback upload successful: ${publicUrl}`)
+
+            finalFallbackUrl = publicUrl
+            storageMetadataFallback = {
+              storage_provider: 'supabase',
+              storage_bucket: 'generated-images',
+              storage_path: storagePath,
+              source_uri: fallbackUrl,
+              mime_type: mimeType,
+              size: buffer.length,
+            }
+          } catch (uploadError: any) {
+            console.error('[image-ai] Failed to upload fallback to Supabase Storage:', uploadError)
+          }
+
+          const completedFallback = {
+            ...newImage,
+            status: 'completed',
+            image_url: finalFallbackUrl,
+            ...(storageMetadataFallback || {}),
+          }
           let remainingCoinsFallback: number
           try {
             remainingCoinsFallback = await deductUserCoins(user.id, coinsUsed)
@@ -263,7 +324,7 @@ export async function POST(req: NextRequest) {
             await creditUserCoins(user.id, coinsUsed).catch(() => null)
             throw dbError
           }
-          return NextResponse.json({ image: { ...completedFallback, imageUrl: fallbackUrl }, coins: remainingCoinsFallback }, { status: 201 })
+          return NextResponse.json({ image: { ...completedFallback, imageUrl: finalFallbackUrl }, coins: remainingCoinsFallback }, { status: 201 })
         }
 
         newImage.status = 'failed'
@@ -285,10 +346,46 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Response did not return a valid image', detail: carubraData }, { status: 502 })
       }
 
+      // Upload to Supabase Storage
+      let finalImageUrl = imageUrl
+      let storageMetadata: {
+        storage_provider: string
+        storage_bucket: string
+        storage_path: string
+        source_uri: string
+        mime_type: string
+        size: number
+      } | null = null
+
+      try {
+        console.log('[image-ai] Uploading image to Supabase Storage...')
+        const { buffer, mimeType } = await imageUrlToBuffer(imageUrl)
+        const storagePath = `${user.id}/${newImage.id}.png`
+        const publicUrl = await uploadToStorage('generated-images', storagePath, buffer, {
+          contentType: mimeType,
+          cacheControl: 'public, max-age=31536000',
+        })
+        console.log(`[image-ai] Upload successful: ${publicUrl}`)
+
+        finalImageUrl = publicUrl
+        storageMetadata = {
+          storage_provider: 'supabase',
+          storage_bucket: 'generated-images',
+          storage_path: storagePath,
+          source_uri: imageUrl,
+          mime_type: mimeType,
+          size: buffer.length,
+        }
+      } catch (uploadError: any) {
+        console.error('[image-ai] Failed to upload to Supabase Storage:', uploadError)
+        // Continue with original URL if upload fails
+      }
+
       const completedImage = {
         ...newImage,
         status: 'completed',
-        image_url: imageUrl,
+        image_url: finalImageUrl,
+        ...(storageMetadata || {}),
       }
 
       let remainingCoins: number

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { findOne, updateOne, uploadToStorage } from '@/lib/supabase'
 import { creditUserCoins } from '@/lib/coins'
 import { getUserFromRequest } from '@/middleware/auth'
-import { getOperationEndpoint, getConfig, getSignedUrl } from '@/lib/vertex'
+import { getOperationEndpoint, getConfig } from '@/lib/vertex'
 import { v4 as uuidv4 } from 'uuid'
 
 /**
@@ -20,6 +20,88 @@ function detectMimeFromBuffer(buffer: Buffer): string {
   // QuickTime: 'ftyp' or 'moov' start
   if (header.includes('6d6f6f76')) return 'video/quicktime'
   return 'video/mp4' // fallback
+}
+
+/**
+ * Detect video dimensions (width, height) from MP4 buffer by parsing the tkhd box.
+ * Returns null if dimensions cannot be determined.
+ */
+function detectVideoDimensions(buffer: Buffer): { width: number; height: number } | null {
+  const len = buffer.length
+  let offset = 0
+
+  while (offset + 8 < len) {
+    const boxSize = buffer.readUInt32BE(offset)
+    if (boxSize < 8 || boxSize > len - offset) break
+    const boxType = buffer.toString('ascii', offset + 4, offset + 8)
+
+    if (boxType === 'moov') {
+      let moovOffset = offset + 8
+      const moovEnd = offset + boxSize
+
+      while (moovOffset + 8 < moovEnd) {
+        const subSize = buffer.readUInt32BE(moovOffset)
+        if (subSize < 8) break
+        const subType = buffer.toString('ascii', moovOffset + 4, moovOffset + 8)
+
+        if (subType === 'trak') {
+          let trakOffset = moovOffset + 8
+          const trakEnd = moovOffset + subSize
+
+          while (trakOffset + 8 < trakEnd) {
+            const childSize = buffer.readUInt32BE(trakOffset)
+            if (childSize < 8) break
+            const childType = buffer.toString('ascii', trakOffset + 4, trakOffset + 8)
+
+            if (childType === 'tkhd') {
+              const version = buffer.readUInt8(trakOffset + 8)
+              // tkhd header: 8 (box header) + 1 (version) + 3 (flags)
+              let dimOffset: number
+              if (version === 1) {
+                // version 1 has 64-bit timestamps
+                dimOffset = trakOffset + 8 + 1 + 3 + 8 + 8 + 4 + 4 + 8 + 8 + 2 + 2 + 2 + 2 + 36
+              } else {
+                // version 0 has 32-bit timestamps
+                dimOffset = trakOffset + 8 + 1 + 3 + 4 + 4 + 4 + 4 + 4 + 8 + 2 + 2 + 2 + 2 + 36
+              }
+              if (dimOffset + 8 <= len) {
+                const width = buffer.readUInt32BE(dimOffset) >> 16
+                const height = buffer.readUInt32BE(dimOffset + 4) >> 16
+                if (width > 0 && height > 0) {
+                  return { width, height }
+                }
+              }
+            }
+            trakOffset += childSize
+          }
+        }
+        moovOffset += subSize
+      }
+    }
+
+    if (boxSize === 0) break
+    offset += boxSize
+  }
+
+  return null
+}
+
+/**
+ * Derive aspect ratio string from video dimensions.
+ * Returns one of the values allowed by the CHECK constraint.
+ */
+function deriveAspectRatio(w: number, h: number): string {
+  if (w <= 0 || h <= 0) return '16:9'
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
+  const g = gcd(w, h)
+  const sw = w / g
+  const sh = h / g
+  // Map to allowed values
+  if (Math.abs(sw / sh - 9 / 16) < 0.1) return '9:16'
+  if (Math.abs(sw / sh - 1) < 0.1) return '1:1'
+  if (Math.abs(sw / sh - 4 / 3) < 0.1) return '4:3'
+  if (Math.abs(sw / sh - 3 / 4) < 0.1) return '3:4'
+  return '16:9' // default
 }
 
 export async function GET(
@@ -253,6 +335,9 @@ export async function GET(
 
             const [downloadedBuffer] = await gcsStorage.bucket(gcsBucketName).file(gcsFileName).download()
             fileBuffer = downloadedBuffer
+            if (!fileBuffer) {
+              throw new Error('Downloaded buffer is null')
+            }
             detectedMime = detectMimeFromBuffer(fileBuffer)
             console.log(`[video-ai] Downloaded buffer size: ${fileBuffer.length} bytes`)
             console.log(`[video-ai] Buffer first 16 bytes (hex): ${fileBuffer.subarray(0, 16).toString('hex')}`)
@@ -265,36 +350,43 @@ export async function GET(
             console.error(`[video-ai] Failed to parse gs:// URI: ${gcsUri}`)
           }
         } catch (storageError: any) {
-          console.error('[video-ai] Failed Supabase storage transfer process:', storageError)
-          try {
-            videoUrl = await getSignedUrl(gcsUri)
-            console.log(`[video-ai] Fallback GCS signed URL generated: ${videoUrl}`)
-          } catch (signedUrlError: any) {
-            console.error('[video-ai] GCS fallback signed URL also failed:', signedUrlError.message)
-            videoUrl = gcsUri
-          }
+          console.error('[video-ai] Failed to download video from GCS:', storageError)
+          throw storageError
         }
-      } else if (!fileBuffer && gcsUri && typeof gcsUri === 'string' && gcsUri.startsWith('http')) {
-        console.log(`[video-ai] Veo returned HTTPS URL directly (no gs://): ${gcsUri}`)
-        videoUrl = gcsUri
       } else if (!fileBuffer && !gcsUri) {
         console.warn('[video-ai] No video data found in completed response')
       }
 
       // Upload buffer to Supabase Storage (shared by both strategies)
+      let storageMetadata: {
+        storage_provider: string
+        storage_bucket: string
+        storage_path: string
+        source_uri: string | null
+        mime_type: string
+        size: number
+      } | null = null
+
       if (fileBuffer && !videoUrl) {
+        console.log('[video-ai] Starting video upload to Supabase Storage...')
         try {
           const existingVideo = await findOne('videos', { job_id: decodedJobId })
           const videoId = existingVideo ? existingVideo.id : uuidv4()
-          const supabasePath = `videos/${videoId}.mp4`
-          const supabaseBucket = process.env.SUPABASE_STORAGE_BUCKET || 'whatsapp'
+          const userId = existingVideo?.user_id || user.id
+          const supabasePath = `${userId}/${videoId}.mp4`
+          const supabaseBucket = 'generated-videos'
 
-          console.log(`[video-ai] Uploading to Supabase Storage: bucket=${supabaseBucket}, path=${supabasePath}, contentType=${detectedMime}`)
+          console.log(`[video-ai] Uploading to bucket: ${supabaseBucket}`)
+          console.log(`[video-ai] Storage path: ${supabasePath}`)
+          console.log(`[video-ai] Content type: ${detectedMime}`)
+          console.log(`[video-ai] Buffer size: ${fileBuffer.length} bytes`)
+
           const publicUrl = await uploadToStorage(supabaseBucket, supabasePath, fileBuffer, {
             contentType: detectedMime,
             cacheControl: 'public, max-age=31536000',
           })
-          console.log(`[video-ai] Supabase upload successful, public URL: ${publicUrl}`)
+          console.log(`[video-ai] Upload completed successfully`)
+          console.log(`[video-ai] Final URL: ${publicUrl}`)
 
           try {
             const verifyRes = await fetch(publicUrl, { method: 'HEAD' })
@@ -306,6 +398,16 @@ export async function GET(
           }
 
           videoUrl = publicUrl
+
+          storageMetadata = {
+            storage_provider: 'supabase',
+            storage_bucket: supabaseBucket,
+            storage_path: supabasePath,
+            source_uri: gcsUri || null,
+            mime_type: detectedMime,
+            size: fileBuffer.length,
+          }
+          console.log(`[video-ai] Storage metadata saved: provider=${storageMetadata.storage_provider}, bucket=${storageMetadata.storage_bucket}, path=${storageMetadata.storage_path}`)
 
           // Cleanup GCS file if we downloaded from GCS
           if (gcsUri && typeof gcsUri === 'string' && gcsUri.startsWith('gs://')) {
@@ -323,33 +425,47 @@ export async function GET(
             }
           }
         } catch (uploadError: any) {
-          console.error('[video-ai] Supabase upload failed:', uploadError)
-          // Fallback: try signed URL if this was a GCS URI
-          if (gcsUri && typeof gcsUri === 'string' && gcsUri.startsWith('gs://')) {
-            try {
-              videoUrl = await getSignedUrl(gcsUri)
-              console.log(`[video-ai] Fallback GCS signed URL generated: ${videoUrl}`)
-            } catch (signedUrlError: any) {
-              console.error('[video-ai] GCS fallback signed URL also failed:', signedUrlError.message)
-              videoUrl = gcsUri
-            }
-          }
+          console.error('[video-ai] Upload to Supabase failed:', uploadError.message)
+          throw uploadError
         }
       }
 
       try {
+        const existingVideo = await findOne('videos', { job_id: decodedJobId })
+        console.log('[video-ai] Existing video record before update:', {
+          id: existingVideo?.id,
+          aspect_ratio: existingVideo?.aspect_ratio,
+          resolution: existingVideo?.resolution,
+        })
+
+        // Detect dimensions from buffer for aspect ratio correction
+        const dims = fileBuffer ? detectVideoDimensions(fileBuffer) : null
+        const correctRatio = dims ? deriveAspectRatio(dims.width, dims.height) : undefined
+
         await updateOne(
           'videos',
           { job_id: decodedJobId },
-          { status: 'completed', video_url: videoUrl ?? null }
+          {
+            status: 'completed',
+            video_url: videoUrl ?? null,
+            ...(correctRatio ? { aspect_ratio: correctRatio } : {}),
+            ...(dims ? { video_width: dims.width, video_height: dims.height } : {}),
+            ...(storageMetadata || {}),
+          }
         )
         console.log(`[video-ai] DB updated: status=completed, video_url=${videoUrl ?? '(null)'}`)
+        if (storageMetadata) {
+          console.log(`[video-ai] DB updated with storage metadata`)
+        }
       } catch (dbErr) {
         console.error('[video-ai] Failed to update completed status in DB:', dbErr)
       }
 
       const responsePayload = { status: 'completed', videoUrl: videoUrl ?? null }
       console.log(`[video-ai] Returning to frontend:`, JSON.stringify(responsePayload))
+      console.log(`[video-ai] videoUrl value:`, videoUrl)
+      console.log(`[video-ai] videoUrl type:`, typeof videoUrl)
+      console.log(`[video-ai] videoUrl length:`, videoUrl?.length)
       return NextResponse.json(responsePayload)
     }
 

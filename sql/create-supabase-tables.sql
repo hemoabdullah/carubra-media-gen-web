@@ -190,3 +190,33 @@ CREATE POLICY IF NOT EXISTS "Users can update own avatar"
 ON storage.objects FOR UPDATE
 TO authenticated
 USING (bucket_id = 'avatars' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+-- ─────────────────────────────────────────────────────────────────
+-- SUPABASE STORAGE: Bucket "generated-videos" untuk video AI
+-- Jalankan ini di Supabase SQL Editor ATAU buat bucket manual di
+-- Storage → New bucket → Name: generated-videos → Public: ON
+-- ─────────────────────────────────────────────────────────────────
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('generated-videos', 'generated-videos', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- If bucket already exists and is private, make it public
+UPDATE storage.buckets SET public = true WHERE id = 'generated-videos' AND public = false;
+
+-- Policy: user dapat upload video mereka sendiri
+CREATE POLICY IF NOT EXISTS "Users can upload own video"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (bucket_id = 'generated-videos' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+-- Policy: video dapat dibaca siapa saja (public)
+CREATE POLICY IF NOT EXISTS "Generated videos are publicly readable"
+ON storage.objects FOR SELECT
+TO public
+USING (bucket_id = 'generated-videos');
+
+-- Policy: user dapat menghapus video mereka sendiri
+CREATE POLICY IF NOT EXISTS "Users can delete own video"
+ON storage.objects FOR DELETE
+TO authenticated
+USING (bucket_id = 'generated-videos' AND auth.uid()::text = (storage.foldername(name))[1]);
