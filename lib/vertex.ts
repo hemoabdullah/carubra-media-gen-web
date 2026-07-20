@@ -3,8 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Storage } from '@google-cloud/storage';
 
-// Load dotenv at module level to ensure environment variables are available
-import 'dotenv/config';
+// Environment variables are loaded by Next.js (server-side)
 
 /**
  * Get Vertex AI configuration dynamically from environment variables
@@ -116,10 +115,19 @@ export function validateVertexConfig(): void {
     errors.push('VERTEX_MODEL is required');
   }
 
+  // For Vercel/serverless deployments, credentials may be provided via ADC
+  // or workload identity federation instead of a local file.
   if (!config.credentialsPath) {
     errors.push('GOOGLE_APPLICATION_CREDENTIALS is required');
-  } else if (!fs.existsSync(config.credentialsPath)) {
-    errors.push(`GOOGLE_APPLICATION_CREDENTIALS file does not exist: ${config.credentialsPath}`);
+  } else if (config.credentialsPath) {
+    try {
+      if (!fs.existsSync(config.credentialsPath)) {
+        // File doesn't exist locally - this is expected on Vercel where ADC is used
+        console.warn(`[vertex.ts] Credentials file not found: ${config.credentialsPath}. Using Application Default Credentials (ADC) if available.`)
+      }
+    } catch {
+      // fs may not be available in all runtimes
+    }
   }
 
   if (!config.outputGcsUri) {
@@ -167,10 +175,12 @@ export async function getSignedUrl(gcsUri: string): Promise<string> {
   const bucketName = match[1];
   const fileName = match[2];
   
-  // Initialize Storage client
-  const storage = new Storage({
-    keyFilename: config.credentialsPath,
-  });
+  // Initialize Storage client (uses ADC if no keyFilename provided)
+  const storageOptions: Record<string, string> = {}
+  if (config.credentialsPath) {
+    storageOptions.keyFilename = config.credentialsPath
+  }
+  const storage = new Storage(storageOptions);
   
   const bucket = storage.bucket(bucketName);
   const file = bucket.file(fileName);

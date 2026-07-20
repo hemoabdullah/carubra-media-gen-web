@@ -114,14 +114,17 @@ export async function POST(req: NextRequest) {
 
         // Get Google Cloud access token
         console.log(`[video-ai] Getting Google Cloud access token...`)
-        console.log(`[video-ai] Using credentials path: ${config.credentialsPath}`)
+        console.log(`[video-ai] Using credentials path: ${config.credentialsPath || 'ADC (Application Default Credentials)'}`)
         let accessToken: string
         try {
           const { GoogleAuth } = require('google-auth-library')
-          const auth = new GoogleAuth({
-            keyFilename: config.credentialsPath,
+          const authOptions: Record<string, any> = {
             scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-          })
+          }
+          if (config.credentialsPath) {
+            authOptions.keyFilename = config.credentialsPath
+          }
+          const auth = new GoogleAuth(authOptions)
           const client = await auth.getClient()
           accessToken = (await client.getAccessToken()).token
           console.log(`[video-ai] Access token obtained successfully`)
