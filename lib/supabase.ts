@@ -1,29 +1,42 @@
 import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-let supabaseClient: SupabaseClient | null = null
+// Removed module-level caching to avoid stale environment variables in serverless environments
 
 function getSupabaseUrl(): string {
-  return process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? ''
+  // On server (Vercel/Node), use SUPABASE_URL
+  // On client/browser, use NEXT_PUBLIC_SUPABASE_URL
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL
+  if (!url) {
+    console.error('[supabase] Missing SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL')
+    console.error('[supabase] Available env vars:', {
+      SUPABASE_URL: !!process.env.SUPABASE_URL,
+      NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+    })
+  }
+  return url || ''
 }
 
 function getSupabaseAnonKey(): string {
-  return process.env.SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
+  const key = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!key) {
+    console.error('[supabase] Missing SUPABASE_ANON_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY')
+  }
+  return key || ''
 }
 
 export async function getSupabase(): Promise<SupabaseClient> {
-  if (!supabaseClient) {
-    const supabaseUrl = getSupabaseUrl()
-    const supabaseKey = getSupabaseAnonKey()
-    if (!supabaseUrl) {
-      throw new Error('Missing environment variable: SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL')
-    }
-    if (!supabaseKey) {
-      throw new Error('Missing environment variable: SUPABASE_ANON_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY')
-    }
-    supabaseClient = createClient(supabaseUrl, supabaseKey)
+  // Don't cache the anon client to avoid stale environment variables
+  // In serverless environments, module-level caching can cause issues
+  const supabaseUrl = getSupabaseUrl()
+  const supabaseKey = getSupabaseAnonKey()
+  if (!supabaseUrl) {
+    throw new Error('Missing environment variable: SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL')
   }
-  return supabaseClient
+  if (!supabaseKey) {
+    throw new Error('Missing environment variable: SUPABASE_ANON_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY')
+  }
+  return createClient(supabaseUrl, supabaseKey)
 }
 
 export async function getSupabaseAdmin(): Promise<SupabaseClient> {
