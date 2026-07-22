@@ -9,7 +9,8 @@ export async function GET(req: NextRequest) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const videos = await find('videos', { user_id: user.id }, { orderBy: 'created_at', ascending: false })
+    // Only return completed videos - drafts in sessions should not appear in history
+    const videos = await find('videos', { user_id: user.id, status: 'completed' }, { orderBy: 'created_at', ascending: false })
 
     console.log('[video-ai] History API - raw videos from DB:', videos.map(v => ({
       id: v.id,

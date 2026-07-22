@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
             }
           ],
           parameters: {
-            outputGcsUri: outputGcsUri,
+            storageUri: outputGcsUri,
             sampleCount: 1,
             ...(providerAspectRatio ? { aspectRatios: [providerAspectRatio] } : {}),
           }

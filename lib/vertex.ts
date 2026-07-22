@@ -152,8 +152,9 @@ export function getVideoGenerationEndpoint(): string {
  * Get the Vertex AI REST API endpoint for fetching operation status
  * For Veo video generation, we use the fetchPredictOperation endpoint
  * Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:fetchPredictOperation
+ * Note: The operation name is sent in the request body, not the URL.
  */
-export function getOperationEndpoint(operationName: string): string {
+export function getOperationEndpoint(_operationName?: string): string {
   const config = getConfig();
   return `https://${config.location}-aiplatform.googleapis.com/v1/projects/${config.project}/locations/${config.location}/publishers/google/models/${config.model}:fetchPredictOperation`;
 }

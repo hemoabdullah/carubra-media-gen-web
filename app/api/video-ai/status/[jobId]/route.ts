@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { findOne, updateOne, uploadToStorage } from '@/lib/supabase'
+import { findOne, updateOne, updateOnly, uploadToStorage } from '@/lib/supabase'
 import { creditUserCoins } from '@/lib/coins'
 import { getUserFromRequest } from '@/middleware/auth'
 import { getOperationEndpoint, getConfig } from '@/lib/vertex'
+import { toModelScopedOperationName } from '@/lib/video-generation'
 import { v4 as uuidv4 } from 'uuid'
 
 /**
@@ -134,6 +135,11 @@ export async function GET(
     let pollData: any = null
     let pollingStrategy = 'none'
 
+    const modelScopedOpName = toModelScopedOperationName(decodedJobId, config.model)
+    if (modelScopedOpName !== decodedJobId) {
+      console.log(`[video-ai] Using model-scoped operation name: ${modelScopedOpName}`)
+    }
+
     // Strategy 1: Use fetchPredictOperation (Veo-specific endpoint)
     try {
       const fetchPredictUrl = getOperationEndpoint(decodedJobId)
@@ -146,7 +152,7 @@ export async function GET(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          operationName: decodedJobId
+          operationName: modelScopedOpName
         }),
       })
       console.log(`[video-ai] fetchPredictOperation status: ${pollRes.status}`)
@@ -442,22 +448,34 @@ export async function GET(
         const dims = fileBuffer ? detectVideoDimensions(fileBuffer) : null
         const correctRatio = dims ? deriveAspectRatio(dims.width, dims.height) : undefined
 
-        await updateOne(
-          'videos',
-          { job_id: decodedJobId },
-          {
-            status: 'completed',
-            video_url: videoUrl ?? null,
-            ...(correctRatio ? { aspect_ratio: correctRatio } : {}),
-            ...(storageMetadata || {}),
-          }
-        )
+        const updateFields: Record<string, any> = {
+          status: 'completed',
+          video_url: videoUrl ?? null,
+          ...(correctRatio ? { aspect_ratio: correctRatio } : {}),
+        }
+        if (storageMetadata) {
+          updateFields.storage_provider = storageMetadata.storage_provider
+          updateFields.storage_bucket = storageMetadata.storage_bucket
+          updateFields.storage_path = storageMetadata.storage_path
+          updateFields.mime_type = storageMetadata.mime_type
+          updateFields.size = storageMetadata.size
+        }
+        await updateOnly('videos', { job_id: decodedJobId }, updateFields)
         console.log(`[video-ai] DB updated: status=completed, video_url=${videoUrl ?? '(null)'}`)
         if (storageMetadata) {
           console.log(`[video-ai] DB updated with storage metadata`)
         }
-      } catch (dbErr) {
+      } catch (dbErr: any) {
         console.error('[video-ai] Failed to update completed status in DB:', dbErr)
+        if (dbErr.code === '57014') {
+          console.error('[video-ai] DB statement timeout - retrying with minimal fields')
+          try {
+            await updateOnly('videos', { job_id: decodedJobId }, { status: 'completed', video_url: videoUrl ?? null })
+            console.log('[video-ai] Minimal DB update succeeded on retry')
+          } catch (retryErr: any) {
+            console.error('[video-ai] Minimal DB update also failed:', retryErr.message)
+          }
+        }
       }
 
       const responsePayload = { status: 'completed', videoUrl: videoUrl ?? null }

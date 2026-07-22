@@ -15,11 +15,12 @@ import {
   Loader2, Video, Sparkles, Share2, Trash2, Edit2, Send,
   Coins, Info, XCircle, CheckCircle2, Clock, LayoutGrid,
   History, Share2 as TwitterIcon, Camera as InstagramIcon, Users as FacebookIcon, Zap, Upload,
-  Eye, Copy, Save, RotateCcw, AlertTriangle,
+  Eye, Copy, Save, RotateCcw, AlertTriangle, ChevronLeft, RefreshCw, X,
 } from "lucide-react"
 import { useLanguage } from "@/contexts/language-context"
 import { useAuth } from "@/contexts/auth-context"
 import { cn } from "@/lib/utils"
+import { VideoSessionEditor } from "@/components/video-session-editor"
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -370,6 +371,11 @@ export default function VideoAIPage() {
   const [isModalRegenerating, setIsModalRegenerating] = useState(false)
   const [isModalCaptioning, setIsModalCaptioning] = useState(false)
 
+  // Session mode state
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [showSessionEditor, setShowSessionEditor] = useState(false)
+  const [pendingSession, setPendingSession] = useState<{ id: string; created_at: string; original_prompt: string } | null>(null)
+
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Simpan interval refs agar bisa di-clear
   const pollingRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({})
@@ -448,6 +454,24 @@ export default function VideoAIPage() {
       }
     }
 
+    // Check for active editing sessions - store info but NEVER auto-open editor
+    fetch("/api/video-sessions", { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (data.sessions && data.sessions.length > 0) {
+          const activeSession = data.sessions[0]
+          setPendingSession({
+            id: activeSession.id,
+            created_at: activeSession.created_at,
+            original_prompt: activeSession.original_prompt,
+          })
+        }
+      })
+      .catch(() => {
+        // Silently fail - session system might not be set up yet
+        console.log('[video-ai] Session check failed, continuing without session mode')
+      })
+
     fetch("/api/video-ai", { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => {
@@ -460,7 +484,7 @@ export default function VideoAIPage() {
             title: v.prompt?.slice(0, 40) || "Video",
             script: v.prompt || "",
             resolution: (v.resolution || "480p") as Resolution,
-            ratio: v.aspect_ratio || v.style || "16-9",
+            ratio: v.aspect_ratio || v.style || "16:9",
             model: (v.model || "text-to-video") as VideoModel,
             duration: v.duration || 30,
             coinCost: v.coins_used || 2,
@@ -640,7 +664,100 @@ export default function VideoAIPage() {
     reader.readAsDataURL(file)
   }
 
-  // ─── Generate video ────────────────────────────────────────────────────────
+  // ─── Start editing session ────────────────────────────────────────────────────
+  const handleStartSession = async () => {
+    if (!canGenerate) return
+    setIsGenerating(true)
+
+    try {
+      const token = localStorage.getItem("carubra-token")
+      if (!token) throw new Error("Auth required")
+
+      const selectedRatio = RATIO_OPTIONS.find(r => r.value === ratio)
+      const body: Record<string, unknown> = {
+        prompt: script,
+        resolution,
+        aspect_ratio: selectedRatio?.ratio || '16:9',
+        duration: parseInt(duration),
+        model,
+        source_image_url: sourceImage,
+      }
+
+      const response = await fetch("/api/video-sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(errorText)
+      }
+
+      const data = await response.json()
+      if (typeof data?.coins === "number") updateCoinBalance(data.coins)
+
+      setActiveSessionId(data.session.id)
+      setShowSessionEditor(true)
+      // Note: isGenerating is set to false by the VideoSessionEditor when polling completes
+    } catch (error: any) {
+      console.error("[video-ai] Failed to start session:", error)
+      setErrorMessage(error.message || "Failed to start editing session")
+      setShowErrorModal(true)
+      setIsGenerating(false)
+    }
+  }
+
+  const handleCloseSession = () => {
+    setActiveSessionId(null)
+    setShowSessionEditor(false)
+    setPendingSession(null)
+    setTitle("")
+    setScript("")
+    setDuration("30")
+    setSourceImage(null)
+    setSourceImageMimeType(null)
+  }
+
+  const handleCancelSession = async () => {
+    if (activeSessionId) {
+      try {
+        const token = localStorage.getItem("carubra-token")
+        await fetch(`/api/video-sessions/${activeSessionId}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      } catch {
+        // silently fail
+      }
+    }
+    handleCloseSession()
+  }
+
+  const handleResumeSession = () => {
+    if (pendingSession) {
+      setActiveSessionId(pendingSession.id)
+      setShowSessionEditor(true)
+      setPendingSession(null)
+    }
+  }
+
+  const handleDiscardSession = async () => {
+    if (pendingSession) {
+      try {
+        const token = localStorage.getItem("carubra-token")
+        await fetch(`/api/video-sessions/${pendingSession.id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      } catch {
+        // silently fail
+      }
+      setPendingSession(null)
+    }
+  }
+
+  // ─── Generate video (legacy mode) ─────────────────────────────────────────────
   const handleGenerate = async () => {
     if (!canGenerate) return
     setIsGenerating(true)
@@ -878,6 +995,35 @@ export default function VideoAIPage() {
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
+  // Show session editor when in session mode
+  if (showSessionEditor && activeSessionId) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" onClick={handleCancelSession} className="gap-2">
+              <ChevronLeft className="h-4 w-4" />
+              Back
+            </Button>
+            <div>
+              <h1 className="text-2xl font-bold text-foreground flex items-center gap-3">
+                <Video className="h-6 w-6 text-primary" />
+                Video Editor
+              </h1>
+              <p className="text-muted-foreground text-sm">Refine your video before saving</p>
+            </div>
+          </div>
+        </div>
+
+        <VideoSessionEditor
+          sessionId={activeSessionId}
+          onClose={handleCloseSession}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Header */}
@@ -890,6 +1036,31 @@ export default function VideoAIPage() {
           <p className="text-muted-foreground mt-1">{t("videoAi.scriptDescriptionPlaceholder")}</p>
         </div>
       </div>
+
+      {/* Pending session banner - appears when an unfinished editing session exists */}
+      {pendingSession && (
+        <Card className="border-amber-500/30 bg-amber-50 dark:bg-amber-950/20">
+          <CardContent className="p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-600 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">You have an unfinished editing session</p>
+                <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5 line-clamp-1">
+                  Created {new Date(pendingSession.created_at).toLocaleString()} &mdash; &ldquo;{pendingSession.original_prompt.slice(0, 80)}{pendingSession.original_prompt.length > 80 ? '...' : ''}&rdquo;
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 flex-shrink-0">
+              <Button size="sm" onClick={handleResumeSession} className="gap-1.5">
+                <RefreshCw className="h-3.5 w-3.5" /> Resume Editing
+              </Button>
+              <Button size="sm" variant="outline" onClick={handleDiscardSession} className="gap-1.5">
+                <X className="h-3.5 w-3.5" /> Discard & Start Fresh
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Main Grid */}
       <div className="grid xl:grid-cols-5 gap-6">
@@ -1011,7 +1182,7 @@ export default function VideoAIPage() {
                 </div>
               )}
 
-              <Button onClick={handleGenerate} disabled={isGenerating || !canGenerate} className="w-full h-12 text-base font-semibold" size="lg">
+              <Button onClick={handleStartSession} disabled={isGenerating || !canGenerate} className="w-full h-12 text-base font-semibold" size="lg">
                 {isGenerating
                   ? <><Loader2 className="h-5 w-5 mr-2 animate-spin" />{t("videoAi.generatingState")}</>
                   : <><Sparkles className="h-5 w-5 mr-2" />{t("videoAi.generate")}</>

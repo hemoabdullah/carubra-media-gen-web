@@ -91,6 +91,14 @@ export async function updateOne(table: string, filter: Record<string, any>, data
   return result
 }
 
+export async function updateOnly(table: string, filter: Record<string, any>, data: any): Promise<void> {
+  const supabase = await getSupabaseAdmin()
+  let query = supabase.from(table).update(data)
+  for (const [key, value] of Object.entries(filter)) query = query.eq(key, value)
+  const { error } = await query
+  if (error) throw error
+}
+
 export async function upsert(table: string, data: any, options?: { onConflict?: string }): Promise<any> {
   const supabase = await getSupabaseAdmin()
   const { data: result, error } = await supabase.from(table).upsert(data, options).select().single()

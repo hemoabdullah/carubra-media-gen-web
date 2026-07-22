@@ -13,6 +13,21 @@ export async function GET(req: NextRequest) {
       username: doc.account_username,
       connectedAt: doc.created_at,
     }))
+
+    // TEMPORARY MOCK FOR DEMO
+    // TODO: Replace with real Threads OAuth integration
+    // Only mock Threads connection for user7@gmail.com
+    if (user.email === 'user7@gmail.com') {
+      const hasThreadsConnection = connections.some((c: any) => c.platform === 'threads')
+      if (!hasThreadsConnection) {
+        connections.push({
+          platform: 'threads',
+          username: 'user7@gmail.com',
+          connectedAt: new Date().toISOString(),
+        })
+      }
+    }
+
     return NextResponse.json({ connections })
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 })
